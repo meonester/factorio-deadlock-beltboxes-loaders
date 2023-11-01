@@ -123,7 +123,6 @@ local function create_beltbox_entity(tier_table)
 			},
 		},
 		dying_explosion = "explosion",
-		corpse = "small-remnants",
 		minable = {hardness = 0.2, mining_time = 0.5, result = tier_table.beltbox_item or tier_table.beltbox},
 		module_specification = { module_slots = 0, module_info_icon_shift = {0,0.25} },
 		allowed_effects = { "consumption" },

@@ -1,4 +1,4 @@
-local STACK_SIZE = settings.startup["deadlock-stack-size"].value
+local STACK_SIZE = settings.startup['deadlock-stack-size'].value
 
 -- work with directions
 local opposite = {
@@ -19,14 +19,34 @@ local function add_vectors(v1, v2)
 	return {v1.x + v2.x, v1.y + v2.y}
 end
 
+-- return single neighbour in specified direction
+local function check_adjecent_in_direction(entity, target, direction)
+	local entities = entity.surface.find_entities_filtered{type = target.type,  position = add_vectors(entity.position, dir2vector[direction])}
+	for _, item in pairs(entities) do
+		if item == target then return {target} end
+	end
+	return {}
+end
+
 -- return all entities 1 tile away in specified direction
-local function get_neighbour_entities(entity, direction)
+local function get_adjecent_entities_in_direction(entity, direction)
 	return entity.surface.find_entities_filtered{ position = add_vectors(entity.position, dir2vector[direction]) }
 end
 
+local function get_adjecent_loaders(entity)
+	local position = entity.position
+	local box = entity.prototype.selection_box
+	local area = {
+	  {position.x + box.left_top.x-1, position.y + box.left_top.y-1},
+	  {position.x + box.right_bottom.x + 1, position.y + box.right_bottom.y + 1}
+	}
+	return entity.surface.find_entities_filtered{type='loader-1x1', area=area, force=entity.force}
+  end
+
 -- does any entity in list have an inventory we can work with
-local function are_loadable(entities)
+local function any_loadable(entities)
 	for _,entity in pairs(entities) do
+		--log('\n' .. entity.name .. ' ' .. serpent.block(entity.type))
 		if entity.get_inventory(defines.inventory.chest) or
 			entity.get_inventory(defines.inventory.furnace_source) or
 			entity.get_inventory(defines.inventory.assembling_machine_input) or
@@ -38,12 +58,12 @@ local function are_loadable(entities)
 end
 
 -- belt facing detection
-local function are_belt_facing(entities, direction)
+local function any_belt_facing(entities, direction)
 	for _,entity in pairs(entities) do
-		if (entity.type == "transport-belt" or
-			entity.type == "underground-belt" or
-			entity.type == "splitter" or
-			entity.type == "loader-1x1") and
+		if (entity.type == 'transport-belt' or
+			entity.type == 'underground-belt' or
+			entity.type == 'splitter' or
+			entity.type == 'loader-1x1') and
 			entity.direction == direction
 		then return true end
 	end
@@ -57,50 +77,111 @@ end
 -- else if no inventories and a belt ahead, turn around; also switch mode if belt is facing towards
 local function on_built_entity(event)
 	local built = event.created_entity
-	-- invalid build? don't bother with faked "revived" property from pre-1.0 Nanobots/Bluebuild, those shenanigans can only be passed in script_raised_* events now
+	-- invalid build? don't bother with faked 'revived' property from pre-1.0 Nanobots/Bluebuild, those shenanigans can only be passed in script_raised_* events now
     -- also no need to check entity type since we can filter for it on the event handler
-	if not built or not built.valid then return end
-	local snap2inv = settings.get_player_settings(game.players[event.player_index])["deadlock-loaders-snap-to-inventories"].value
-	local snap2belt = settings.get_player_settings(game.players[event.player_index])["deadlock-loaders-snap-to-belts"].value
+	if not built or not built.valid then
+		return
+	end
+
+	local snap2inv = settings.get_player_settings(game.players[event.player_index])['deadlock-loaders-snap-to-inventories'].value
+	local snap2belt = settings.get_player_settings(game.players[event.player_index])['deadlock-loaders-snap-to-belts'].value
 	-- no need to check anything if configs are off
 	if not snap2inv and not snap2belt then
 		return
 	end
-	-- get the entities from both ends
-	local belt_end = get_neighbour_entities(built, built.direction)
-	local loading_end = get_neighbour_entities(built, opposite[built.direction])
-	
-	if snap2belt and are_belt_facing(belt_end, opposite[built.direction]) then
-		-- there's a belt facing toward the belt-side of the loader, so we want to be in input mode
-		built.rotate( {by_player = event.player_index} )
-	elseif snap2belt and are_belt_facing(belt_end, built.direction) then
-		-- there's a belt facing away from the belt-side of the loader, so we want to be certain to stay in output mode, stop further checks
-		return
-	elseif snap2inv and are_loadable(loading_end) then
-		-- there's a loadable entity on the loader end
-		-- as long as there's no belt facing away from the belt end, flip into input mode to load it up
-		if not are_belt_facing(belt_end, built.direction) then
-			built.rotate( {by_player = event.player_index} )
+
+	if not event.revived and built.type == 'loader-1x1' then
+
+		local loader = built;
+		local belt_side_direction = loader.direction
+		-- if loader in input mode, switch
+		if loader.loader_type == 'input' then belt_side_direction = opposite[loader.direction] end
+
+		local belt_end_entities = get_adjecent_entities_in_direction(loader, belt_side_direction)
+		local loading_end_entities = get_adjecent_entities_in_direction(loader, opposite[belt_side_direction])
+
+		if snap2belt and any_belt_facing(belt_end_entities, loader.direction) then
+			-- belt on belt side, same direction
+		elseif snap2belt and any_belt_facing(belt_end_entities, opposite[loader.direction]) then
+			-- belt on belt side, opposite direction
+			loader.rotate( {by_player = event.player_index} )
+		elseif snap2inv and any_loadable(loading_end_entities) then
+			-- inventory on loading side
+			if any_belt_facing(belt_end_entities, opposite[loader.direction]) then
+				loader.rotate( {by_player = event.player_index} )
+			end
+		elseif snap2inv and any_loadable(belt_end_entities) then
+			-- inventory on belt side
+			loader.direction = opposite[loader.direction]
+			if any_belt_facing(loading_end_entities, opposite[loader.direction]) then
+				loader.rotate( {by_player = event.player_index} )
+			end
+		elseif snap2belt and any_belt_facing(loading_end_entities, loader.direction) then
+			-- belt on loading on belt side, same direction
+			loader.direction = opposite[loader.direction]
+			loader.rotate( {by_player = event.player_index} )
+		elseif snap2belt and any_belt_facing(loading_end_entities, opposite[loader.direction]) then
+			-- belt on loading on belt side, opposite direction
+			loader.direction = opposite[loader.direction]
 		end
-	elseif are_loadable(belt_end) then
-		-- there's a loadable entity on the belt end but not on the loader end, flip around and go into input mode to load it up
-		built.direction = opposite[built.direction]
-		-- unless there's a belt facing away, then stay in output mode
-		if not are_belt_facing(loading_end, built.direction) then
-			-- that wasn't the case so we're safe to go into input mode
-			built.rotate( {by_player = event.player_index} )
+		--loader.surface.create_entity{name='flying-text', position={loader.position.x-.25, loader.position.y-.5}, text = '^', color = {g=1}}
+
+	elseif not event.revived then
+		-- this part tries to switch direction and/or rotate loader if something was placed next to it
+
+		local loaders = get_adjecent_loaders(built)
+		for _, loader in pairs(loaders) do
+
+			local belt_side_direction = loader.direction
+			-- if loader in input mode, switch
+			if loader.loader_type == 'input' then belt_side_direction = opposite[loader.direction] end
+
+			local belt_end_entity = check_adjecent_in_direction(loader, built, belt_side_direction)
+			local loading_end_entity = check_adjecent_in_direction(loader, built, opposite[belt_side_direction])
+
+			if snap2belt and any_belt_facing(belt_end_entity, loader.direction) then
+				-- belt on belt side, same direction
+			elseif snap2belt and any_belt_facing(belt_end_entity, opposite[loader.direction]) then
+				-- belt on belt side, opposite direction
+				loader.rotate( {by_player = event.player_index} )
+			elseif snap2inv and any_loadable(loading_end_entity) then
+				-- inventory on loading side
+				belt_end_entity = get_adjecent_entities_in_direction(loader, belt_side_direction)
+				if any_belt_facing(belt_end_entity, opposite[loader.direction]) then
+					loader.rotate( {by_player = event.player_index} )
+				end
+			elseif snap2inv and any_loadable(belt_end_entity) then
+				-- inventory on belt side
+				loader.direction = opposite[loader.direction]
+
+				loading_end_entity = get_adjecent_entities_in_direction(loader, opposite[belt_side_direction])
+				if any_belt_facing(loading_end_entity, opposite[loader.direction]) then
+					loader.rotate( {by_player = event.player_index} )
+				end
+			elseif snap2belt and any_belt_facing(loading_end_entity, loader.direction) then
+				-- belt on loading on belt side, same direction
+				loader.direction = opposite[loader.direction]
+				loader.rotate( {by_player = event.player_index} )
+			elseif snap2belt and any_belt_facing(loading_end_entity, opposite[loader.direction]) then
+				-- belt on loading on belt side, opposite direction
+				loader.direction = opposite[loader.direction]
+			end
+			--loader.surface.create_entity{name='flying-text', position={loader.position.x-.25, loader.position.y-.5}, text = '*', color = {r=1}}
 		end
-	elseif snap2belt and are_belt_facing(loading_end, built.direction) then
-		-- there's a belt facing into the loader end, switch into input mode and flip
-		built.direction = opposite[built.direction]
-		built.rotate( {by_player = event.player_index} )
-	elseif snap2belt and are_belt_facing(loading_end, opposite[built.direction]) then
-		-- there's a belt facing away from the loader end, flip
-		built.direction = opposite[built.direction]
 	end
 end
--- add filter to save another millisecond
-script.on_event(defines.events.on_built_entity, on_built_entity, {{filter="type", type = "loader-1x1"}})
+
+local built_event_filters = {
+	{filter = 'type', type = 'loader-1x1'},
+	{filter = 'type', type = 'transport-belt'},
+	{filter = 'type', type = 'underground-belt'},
+	{filter = 'type', type = 'splitter'},
+	{filter = 'type', type = 'container'},
+	{filter = 'type', type = 'assembling-machine'},
+	{filter = 'type', type = 'furnace'},
+	{filter = 'type', type = 'lab'},
+}
+script.on_event(defines.events.on_built_entity, on_built_entity, built_event_filters)
 
 -- auto-unstacking by ownlyme
 local function auto_unstack(item_name, item_count, sending_inventory, receiving_inventory)
@@ -108,7 +189,7 @@ local function auto_unstack(item_name, item_count, sending_inventory, receiving_
 	-- item_count: The number of items that should be unstacked
 	-- sending_inventory: the inventory that contains the stacked item
 	-- receiving_inventory: the inventory that receives the unstacked items
-	if string.sub(item_name, 1, 15) == "deadlock-stack-" then
+	if string.sub(item_name, 1, 15) == 'deadlock-stack-' then
 		-- attempt to auto-unstack
 		-- try to add a stack worth of the source item to the inventory
 		local add_count = STACK_SIZE
@@ -122,8 +203,8 @@ local function auto_unstack(item_name, item_count, sending_inventory, receiving_
 			name = string.sub(item_name, 16),
 			count = add_count * item_count,
 		})
-		
-		local partial_inserted = inserted % add_count 
+
+		local partial_inserted = inserted % add_count
 		-- if player inventory is nearly full it may happen that just 8 items are inserted with add_count==5
 		-- partial inserted then will be 3
 		if partial_inserted > 0 then
@@ -144,8 +225,8 @@ local function auto_unstack(item_name, item_count, sending_inventory, receiving_
 end
 
 local inventories_to_check = {
-	defines.inventory.chest, 
-	defines.inventory.furnace_source, 
+	defines.inventory.chest,
+	defines.inventory.furnace_source,
 	defines.inventory.furnace_result,
 	defines.inventory.cargo_wagon,
 	defines.inventory.assembling_machine_input,
@@ -168,11 +249,11 @@ local function on_pre_player_mined_item(event)
 		try_unstacking(event.entity, v, player_inventory)
 	end
 end
-local function on_picked_up_item(event) 
+local function on_picked_up_item(event)
 	local player_inventory = game.players[event.player_index].get_main_inventory()
 	auto_unstack(event.item_stack.name, event.item_stack.count, player_inventory, player_inventory)
 end
-local function on_player_mined_entity(event) 
+local function on_player_mined_entity(event)
 	local player_inventory = game.players[event.player_index].get_main_inventory()
 	for item_name, item_count in pairs(event.buffer.get_contents()) do
 		auto_unstack(item_name, item_count, event.buffer, player_inventory)
@@ -180,7 +261,7 @@ local function on_player_mined_entity(event)
 end
 -- conditionally register based on the state of the setting so it's not costing any performance when disabled
 local function on_load(event)
-	if settings.startup["deadlock-stacking-auto-unstack"].value then
+	if settings.startup['deadlock-stacking-auto-unstack'].value then
 		script.on_event(defines.events.on_picked_up_item, on_picked_up_item) -- works on items that are picked up with f key
 		script.on_event(defines.events.on_player_mined_item, on_picked_up_item) -- works on items which are directly mined from the ground
 		script.on_event(defines.events.on_player_mined_entity, on_player_mined_entity) -- works on mined belts that carry items
@@ -198,7 +279,7 @@ local function on_configuration_changed(config)
 			if tech_table.researched then
 				-- find any beltboxes or loaders or stacks in effects and unlock
 				for _, effect_table in ipairs(tech_table.effects) do
-					if effect_table.type == "unlock-recipe" and (string.find(game.recipe_prototypes[effect_table.recipe].order, "%-deadlock%-") or string.find(game.recipe_prototypes[effect_table.recipe].name, "deadlock%-")) then
+					if effect_table.type == 'unlock-recipe' and (string.find(game.recipe_prototypes[effect_table.recipe].order, '%-deadlock%-') or string.find(game.recipe_prototypes[effect_table.recipe].name, 'deadlock%-')) then
 						force.recipes[effect_table.recipe].enabled = true
 					end
 				end
